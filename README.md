@@ -43,3 +43,20 @@ The `ColumnGeneration` class implements the column generation optimization metho
 
 5. **Action Conversion**:
    - Convert the selected pattern into a placement action.
+
+## Comparison of Policies
+
+| Feature                | FirstCutPolicy                    | ColumnGeneration             |
+|------------------------|------------------------------------|------------------------------|
+| **Type**              | Heuristic                        | Optimization-based           |
+| **Efficiency**        | Fast, simpler logic              | Slower, computationally intensive |
+| **Optimality**        | Suboptimal, greedy placement     | Near-optimal patterns        |
+| **Complexity**        | Low                              | High                        |
+| **Use Case**          | Small-scale problems, quick results | Large-scale problems requiring minimal waste |
+
+## Policy Performance Comparison
+
+| Policy              | Filled Ratio | Trim Loss            |
+|---------------------|--------------|----------------------|
+| **FirstCutPolicy**  | 0.14         | 0.2216599996670104   |
+| **ColumnGeneration**| 0.2          | 0.19658451138683425  |
