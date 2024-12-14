@@ -32,12 +32,11 @@ class FirstCutPolicy:
 
         return None
 
-### WIP
 class ColumnGeneration(Policy):
     def __init__(self):
         super().__init__()
         self.patterns = []
-        self.initialized = False
+        self.is_initialized = False
         self.num_products = 0
 
     def get_action(self, observation, info):
@@ -48,120 +47,143 @@ class ColumnGeneration(Policy):
         sizes = [product["size"] for product in products]
         num_products = len(products)
 
-        if not self.initialized or self.num_products != num_products:
-            self.initialize_patterns(num_products, sizes, stocks)
-            self.initialized = True
+        if not self.is_initialized or self.num_products != num_products:
+            self._setup_initial_patterns(num_products, sizes, stocks)
+            self.is_initialized = True
             self.num_products = num_products
 
         while True:
-            c = np.ones(len(self.patterns))
-            A = np.array(self.patterns).T
-            b = demand
+            coefficients = np.ones(len(self.patterns))
+            constraint_matrix = np.array(self.patterns).T
+            demand_constraints = demand
 
-            res = linprog(c, A_ub=-A, b_ub=-b, bounds=(0, None), method='highs')
+            result = linprog(
+                c=coefficients,
+                A_ub=-constraint_matrix,
+                b_ub=-demand_constraints,
+                bounds=(0, None),
+                method="highs"
+            )
 
-            if res.status != 0:
-                break
+            if result.status != 0:
+                break 
 
-            dual_prices = getattr(res, "ineqlin", {}).get("marginals", None)
-
+            dual_prices = self._extract_duals(result, demand)
             if dual_prices is None:
                 break
 
-            new_pattern = self.generate_pattern(dual_prices, sizes, stocks)
-
-            if new_pattern is None or any(np.array_equal(new_pattern, p) for p in self.patterns):
+            new_pattern = self._find_new_pattern(dual_prices, sizes, stocks)
+            if new_pattern is None or any((new_pattern == p).all() for p in self.patterns):
                 break
 
             self.patterns.append(new_pattern)
 
-        best_pattern = self.choose_best_pattern(self.patterns, demand)
-        action = self.convert_pattern_to_action(best_pattern, sizes, stocks)
-        return action
+        chosen_pattern = self._choose_pattern(demand)
+        return self._convert_to_action(chosen_pattern, sizes, stocks)
 
-    def initialize_patterns(self, num_products, sizes, stocks):
-        """Generate initial patterns based on product sizes and stock availability."""
+    def _setup_initial_patterns(self, num_products, sizes, stocks):
+        """Generate initial patterns by checking all products against available stocks."""
         self.patterns = []
         for stock in stocks:
-            stock_size = self._get_stock_size_(stock)
-            for i in range(num_products):
-                if stock_size[0] >= sizes[i][0] and stock_size[1] >= sizes[i][1]:
+            stock_dimensions = self._get_stock_size_(stock)
+            for i, product_size in enumerate(sizes):
+                if self._fits_in_stock(product_size, stock_dimensions):
                     pattern = np.zeros(num_products, dtype=int)
                     pattern[i] = 1
                     self.patterns.append(pattern)
 
-        self.patterns = list({tuple(p): p for p in self.patterns}.values())
+        # Ensure unique patterns
+        self.patterns = [np.array(p) for p in {tuple(p): p for p in self.patterns}.values()]
 
-    def generate_pattern(self, dual_prices, sizes, stocks):
+    def _extract_duals(self, linprog_result, demand):
+        """Extract dual prices from the optimization result."""
+        if hasattr(linprog_result, "ineqlin") and hasattr(linprog_result.ineqlin, "marginals"):
+            return linprog_result.ineqlin.marginals
+        return None
+
+    def _find_new_pattern(self, dual_prices, sizes, stocks):
+        """Generate a new pattern using a heuristic greedy approach."""
         best_pattern = None
-        best_cost = float('-inf')
+        highest_value = -float("inf")
 
         for stock in stocks:
-            stock_width, stock_height = self._get_stock_size_(stock)
-
-            dp = np.zeros((stock_height + 1, stock_width + 1))
-            pattern = np.zeros(len(sizes), dtype=int)
+            stock_w, stock_h = self._get_stock_size_(stock)
+            dp_table = np.zeros((stock_h + 1, stock_w + 1))
+            candidate_pattern = np.zeros(len(sizes), dtype=int)
 
             for i, size in enumerate(sizes):
-                prod_width, prod_height = size
-                if prod_width <= stock_width and prod_height <= stock_height and dual_prices[i] > 0:
-                    for x in range(stock_width, prod_width - 1, -1):
-                        for y in range(stock_height, prod_height - 1, -1):
-                            dp[y][x] = max(dp[y][x], dp[y - prod_height][x - prod_width] + dual_prices[i])
+                prod_w, prod_h = size
+                if prod_w <= stock_w and prod_h <= stock_h and dual_prices[i] > 0:
+                    for w in range(stock_w, prod_w - 1, -1):
+                        for h in range(stock_h, prod_h - 1, -1):
+                            dp_table[h][w] = max(
+                                dp_table[h][w], dp_table[h - prod_h][w - prod_w] + dual_prices[i]
+                            )
 
-            width, height = stock_width, stock_height
+            current_w, current_h = stock_w, stock_h
             for i in range(len(sizes) - 1, -1, -1):
-                prod_width, prod_height = sizes[i]
-                if width >= prod_width and height >= prod_height and dp[height][width] == dp[height - prod_height][width - prod_width] + dual_prices[i]:
-                    pattern[i] += 1
-                    width -= prod_width
-                    height -= prod_height
+                prod_w, prod_h = sizes[i]
+                if (
+                    current_w >= prod_w
+                    and current_h >= prod_h
+                    and dp_table[current_h][current_w]
+                    == dp_table[current_h - prod_h][current_w - prod_w] + dual_prices[i]
+                ):
+                    candidate_pattern[i] += 1
+                    current_w -= prod_w
+                    current_h -= prod_h
 
-            reduced_cost = np.dot(pattern, dual_prices) - 1
-            if reduced_cost > best_cost:
-                best_cost = reduced_cost
-                best_pattern = pattern
+            value = np.dot(candidate_pattern, dual_prices) - 1
+            if value > highest_value:
+                highest_value = value
+                best_pattern = candidate_pattern
 
-        return best_pattern if best_cost > 1e-6 else None
+        return best_pattern if highest_value > 0 else None
 
-    def choose_best_pattern(self, patterns, demand):
-        """Select the pattern that satisfies the most demand."""
-        best_pattern = None
+    def _choose_pattern(self, demand):
+        """Choose the pattern that maximizes product demand coverage."""
         max_coverage = -1
+        selected_pattern = None
 
-        for pattern in patterns:
+        for pattern in self.patterns:
             coverage = np.sum(np.minimum(pattern, demand))
             if coverage > max_coverage:
                 max_coverage = coverage
-                best_pattern = pattern
+                selected_pattern = pattern
 
-        return best_pattern
+        return selected_pattern
 
-    def convert_pattern_to_action(self, pattern, sizes, stocks):
-        """Translate a pattern into an actionable cutting plan."""
-        for i, count in enumerate(pattern):
+    def _convert_to_action(self, pattern, sizes, stocks):
+        """Convert the chosen pattern into an actionable cutting plan."""
+        for product_idx, count in enumerate(pattern):
             if count > 0:
-                product_size = sizes[i]
+                product_size = sizes[product_idx]
                 for stock_idx, stock in enumerate(stocks):
-                    stock_width, stock_height = self._get_stock_size_(stock)
-                    if stock_width >= product_size[0] and stock_height >= product_size[1]:
-                        position = self.bottom_left_placement(stock, product_size)
-                        if position:
-                            return {"stock_idx": stock_idx, "size": product_size, "position": position}
+                    stock_w, stock_h = self._get_stock_size_(stock)
+                    if stock_w >= product_size[0] and stock_h >= product_size[1]:
+                        placement = self._find_placement(stock, product_size)
+                        if placement:
+                            return {"stock_idx": stock_idx, "size": product_size, "position": placement}
 
         return {"stock_idx": -1, "size": [0, 0], "position": (0, 0)}
 
-    def bottom_left_placement(self, stock, product_size):
-        """Find the bottom-left most placement for a product in the stock."""
-        stock_width, stock_height = self._get_stock_size_(stock)
-        prod_width, prod_height = product_size
+    def _find_placement(self, stock, product_size):
+        """Find a valid placement for the product in the stock."""
+        stock_w, stock_h = self._get_stock_size_(stock)
+        prod_w, prod_h = product_size
 
-        for y in range(stock_height - prod_height + 1):
-            for x in range(stock_width - prod_width + 1):
+        for y in range(stock_h - prod_h + 1):
+            for x in range(stock_w - prod_w + 1):
                 if self._can_place_(stock, (x, y), product_size):
-                    return x, y
+                    return (x, y)
 
         return None
+
+    def _fits_in_stock(self, product_size, stock_size):
+        """Check if a product can fit in a stock."""
+        prod_w, prod_h = product_size
+        stock_w, stock_h = stock_size
+        return prod_w <= stock_w and prod_h <= stock_h
     
 
 class Policy2052519(Policy):
